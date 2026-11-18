@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VetCord Settings</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>VetCord Settings</h1>
+  <p class="muted">Login happens on Discord's own page in the main window.
+  VetCord never sees or stores your password or token.</p>
+
+  <section>
+    <h2>Client</h2>
+    <label><input type="checkbox" id="debloat"> Hide Nitro upsells, gift and shop buttons</label>
+    <label><input type="checkbox" id="start_minimised"> Start minimised</label>
+  </section>
+
+  <section>
+    <h2>Automatic clipping</h2>
+    <label><input type="checkbox" id="clipping_enabled"> Auto-start replay buffer on launch</label>
+    <label>Buffer length (seconds)
+      <input type="number" id="clip_seconds" min="15" max="600" step="15">
+    </label>
+    <label>Capture FPS
+      <input type="number" id="clip_fps" min="15" max="240" step="15">
+    </label>
+    <label>Capture backend
+      <select id="clip_backend">
+        <option value="auto">Auto (GPU, then CPU fallback)</option>
+        <option value="gpu">GPU (ddagrab + NVENC)</option>
+        <option value="cpu">CPU (gdigrab + x264)</option>
+      </select>
+    </label>
+    <label>Capture target
+      <select id="capture_target">
+        <option value="desktop">Whole desktop</option>
+        <option value="window">Single window (game)</option>
+      </select>
+    </label>
+    <label>Window to capture
+      <select id="capture_window"></select>
+      <button id="refresh-windows" type="button">Refresh windows</button>
+    </label>
+    <label><input type="checkbox" id="hotkey_enabled"> Enable global save-clip hotkey</label>
+    <label>Hotkey (applies on Save)
+      <input type="text" id="hotkey" placeholder="Ctrl+Alt+C" size="18">
+    </label>
+    <p id="clip-status" class="muted">Loading clip status…</p>
+    <button id="toggle-clip" type="button">Start clipping</button>
+    <button id="save-clip" type="button">Save clip now</button>
+    <p class="muted">While clipping runs, your whole desktop is recorded into a
+    rolling buffer (like OBS replay buffer). Nothing leaves your PC.</p>
+  </section>
+
+  <p id="save-status" role="status"></p>
+  <button id="save" type="button">Save settings</button>
+  <p class="muted">Settings changes to debloat apply on next launch.</p>
+</main>
+<script src="settings.js"></script>
+</body>
+</html>

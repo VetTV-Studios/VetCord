@@ -7,8 +7,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-/// TODO: point this at the published repository once VetCord has one.
-pub const GITHUB_ISSUES_URL: &str = "https://github.com/YOUR-USERNAME/vetcord/issues";
+pub const GITHUB_ISSUES_URL: &str = "https://github.com/VetTV-Studios/VetCord/issues";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Suggestion {

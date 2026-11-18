@@ -3,6 +3,9 @@
 mod clip;
 mod debloat;
 mod settings;
+mod stream;
+mod stream_keys;
+mod suggestions;
 mod window_list;
 
 use settings::Settings;
@@ -20,8 +23,11 @@ AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 
 struct AppState {
     settings_path: PathBuf,
+    config_dir: PathBuf,
+    data_dir: PathBuf,
     popups: AtomicU32,
     recorder: std::sync::Mutex<Option<clip::Recorder>>,
+    streamer: std::sync::Mutex<Option<stream::Streamer>>,
     last_clip: std::sync::Mutex<Option<String>>,
     registered_hotkey: std::sync::Mutex<Option<String>>,
 }
@@ -130,6 +136,90 @@ fn stop_clipping(state: State<'_, AppState>) {
 #[tauri::command]
 fn save_clip(state: State<'_, AppState>) -> Result<String, String> {
     do_save_clip(&state)
+}
+
+fn key_store(state: &AppState) -> stream_keys::KeyStore {
+    stream_keys::KeyStore::new(state.config_dir.clone())
+}
+
+#[tauri::command]
+fn set_stream_key(
+    state: State<'_, AppState>,
+    destination: String,
+    key: String,
+) -> Result<(), String> {
+    if key.trim().is_empty() {
+        key_store(&state).clear(&destination)
+    } else {
+        key_store(&state).set(&destination, key.trim())
+    }
+}
+
+/// Destination names that have a stored key. Keys themselves never
+/// leave the Rust side.
+#[tauri::command]
+fn stream_keys_present(state: State<'_, AppState>) -> Vec<String> {
+    let s = Settings::load(&state.settings_path);
+    let store = key_store(&state);
+    s.stream_destinations
+        .iter()
+        .filter(|d| store.has(&d.name))
+        .map(|d| d.name.clone())
+        .collect()
+}
+
+#[tauri::command]
+fn start_stream(state: State<'_, AppState>) -> Result<(), String> {
+    let s = Settings::load(&state.settings_path);
+    let mut guard = state.streamer.lock().unwrap();
+    if guard.is_some() {
+        return Ok(());
+    }
+    *guard = Some(stream::start_stream(&s, &key_store(&state))?);
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_stream(state: State<'_, AppState>) {
+    let mut guard = state.streamer.lock().unwrap();
+    if let Some(mut streamer) = guard.take() {
+        stream::stop_stream(&mut streamer);
+    }
+}
+
+#[tauri::command]
+fn get_stream_status(state: State<'_, AppState>) -> stream::StreamStatus {
+    let s = Settings::load(&state.settings_path);
+    let mut guard = state.streamer.lock().unwrap();
+    // If ffmpeg died, report stopped rather than "live".
+    if guard.as_mut().map(|st| !st.is_alive()).unwrap_or(false) {
+        *guard = None;
+    }
+    stream::status(guard.as_ref(), &s)
+}
+
+#[tauri::command]
+fn submit_suggestion(
+    state: State<'_, AppState>,
+    title: String,
+    details: String,
+) -> Result<(), String> {
+    suggestions::append(
+        &suggestions::suggestions_path(&state.data_dir),
+        &title,
+        &details,
+    )?;
+    Ok(())
+}
+
+#[tauri::command]
+fn list_suggestions(state: State<'_, AppState>) -> Vec<suggestions::Suggestion> {
+    suggestions::list(&suggestions::suggestions_path(&state.data_dir))
+}
+
+#[tauri::command]
+fn github_issues_url() -> &'static str {
+    suggestions::GITHUB_ISSUES_URL
 }
 
 #[tauri::command]
@@ -251,10 +341,21 @@ fn main() {
         .setup(|app| {
             let path = settings_path(app.handle());
             let settings = Settings::load(&path);
+            let config_dir = app
+                .path()
+                .app_config_dir()
+                .unwrap_or_else(|_| std::env::temp_dir());
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .unwrap_or_else(|_| std::env::temp_dir());
             app.manage(AppState {
                 settings_path: path,
+                config_dir,
+                data_dir,
                 popups: AtomicU32::new(0),
                 recorder: std::sync::Mutex::new(None),
+                streamer: std::sync::Mutex::new(None),
                 last_clip: std::sync::Mutex::new(None),
                 registered_hotkey: std::sync::Mutex::new(None),
             });
@@ -287,17 +388,29 @@ fn main() {
             start_clipping,
             stop_clipping,
             save_clip,
+            set_stream_key,
+            stream_keys_present,
+            start_stream,
+            stop_stream,
+            get_stream_status,
+            submit_suggestion,
+            list_suggestions,
+            github_issues_url,
             open_settings
         ])
         .build(tauri::generate_context!())
         .expect("error while building VetCord")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
-                // Never leave ffmpeg capturing after VetCord closes.
+                // Never leave ffmpeg capturing/streaming after VetCord closes.
                 let state = app.state::<AppState>();
                 let mut guard = state.recorder.lock().unwrap();
                 if let Some(mut recorder) = guard.take() {
                     clip::stop_recorder(&mut recorder);
+                }
+                let mut guard = state.streamer.lock().unwrap();
+                if let Some(mut streamer) = guard.take() {
+                    stream::stop_stream(&mut streamer);
                 }
             }
         });

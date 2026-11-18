@@ -74,10 +74,15 @@ impl Backend {
 }
 
 /// Ordered backends to try. Window targets always use gdigrab title
-/// capture (ddagrab only grabs whole displays). Unit-tested.
+/// capture; fullscreen targets always use the Desktop Duplication API,
+/// because gdigrab records black frames from exclusive-fullscreen games
+/// (they bypass the desktop compositor). Unit-tested.
 fn backend_candidates(preference: &str, capture_target: &str) -> Vec<Backend> {
     if capture_target == "window" {
         return vec![Backend::Window];
+    }
+    if capture_target == "fullscreen" {
+        return vec![Backend::Gpu];
     }
     match preference {
         "gpu" => vec![Backend::Gpu],
@@ -276,7 +281,18 @@ pub fn start_recorder(
         }
     }
     let (child, backend) = started.ok_or_else(|| {
-        format!("no capture backend started ({})", errors.join("; "))
+        if capture_target == "fullscreen" {
+            // Deliberately no gdigrab fallback: it would record black
+            // frames from exclusive-fullscreen games and look broken.
+            format!(
+                "Fullscreen capture needs the GPU (Desktop Duplication API) and it \
+                 did not start ({}). Use the Desktop target, or run the game in \
+                 borderless/windowed mode and use Window capture.",
+                errors.join("; ")
+            )
+        } else {
+            format!("no capture backend started ({})", errors.join("; "))
+        }
     })?;
 
     let running = Arc::new(AtomicBool::new(true));
@@ -425,6 +441,9 @@ mod tests {
         // Window capture ignores the GPU/CPU preference.
         assert_eq!(backend_candidates("gpu", "window"), vec![Backend::Window]);
         assert_eq!(backend_candidates("auto", "window"), vec![Backend::Window]);
+        // Fullscreen is GPU-only (gdigrab would record black frames).
+        assert_eq!(backend_candidates("cpu", "fullscreen"), vec![Backend::Gpu]);
+        assert_eq!(backend_candidates("auto", "fullscreen"), vec![Backend::Gpu]);
     }
 
     #[test]
@@ -459,6 +478,23 @@ mod tests {
         let info = String::from_utf8_lossy(&output.stderr);
         assert!(info.contains("Video:"), "clip contains a video stream: {info}");
         println!("saved clip: {path} ({} bytes)", meta.len());
+    }
+
+    /// Fullscreen target: DDA capture of the display (the path that
+    /// sees exclusive-fullscreen games). Run with:
+    /// cargo test clip_fullscreen_e2e -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn clip_fullscreen_e2e_uses_gpu_backend() {
+        let mut recorder =
+            start_recorder(60, 30, "cpu", "fullscreen", "").expect("fullscreen recorder starts");
+        assert_eq!(recorder.backend_used, "gpu");
+        std::thread::sleep(Duration::from_secs(13));
+        let path = save_clip(5).expect("fullscreen clip saved");
+        stop_recorder(&mut recorder);
+        let meta = std::fs::metadata(&path).expect("clip exists");
+        assert!(meta.len() > 10_000, "clip has content: {} bytes", meta.len());
+        println!("saved fullscreen clip: {path} ({} bytes)", meta.len());
     }
 
     /// Per-window capture: record a real open window, save a clip.

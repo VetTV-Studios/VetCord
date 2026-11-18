@@ -27,6 +27,36 @@ pub struct Settings {
     pub capture_target: String,
     /// Exact window title to capture when capture_target is "window".
     pub capture_window: String,
+    /// Video bitrate for live streaming, in kbps.
+    pub stream_bitrate_kbps: u32,
+    /// Live-streaming destinations. Stream keys are NOT stored here;
+    /// they live in the DPAPI-encrypted key file (see stream_keys.rs).
+    pub stream_destinations: Vec<StreamDestination>,
+}
+
+/// One RTMP ingest target for multistreaming.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct StreamDestination {
+    /// Display name, also the key used to look up the stored stream key.
+    pub name: String,
+    /// "x", "rumble", or "custom".
+    pub kind: String,
+    /// Ingest server URL (rtmp:// or rtmps://), without the stream key.
+    pub server: String,
+    pub enabled: bool,
+}
+
+impl StreamDestination {
+    pub fn preset_server(kind: &str) -> &'static str {
+        match kind {
+            // X (Twitter) Media Studio producer ingest.
+            "x" => "rtmps://rtmp-ams.pscp.tv:443/x",
+            // Rumble Studio / Rumble live RTMP ingest.
+            "rumble" => "rtmp://rtmp.rumble.com/live",
+            _ => "",
+        }
+    }
 }
 
 impl Default for Settings {
@@ -42,6 +72,21 @@ impl Default for Settings {
             hotkey: "Ctrl+Alt+C".to_string(),
             capture_target: "desktop".to_string(),
             capture_window: String::new(),
+            stream_bitrate_kbps: 6000,
+            stream_destinations: vec![
+                StreamDestination {
+                    name: "X".to_string(),
+                    kind: "x".to_string(),
+                    server: StreamDestination::preset_server("x").to_string(),
+                    enabled: false,
+                },
+                StreamDestination {
+                    name: "Rumble".to_string(),
+                    kind: "rumble".to_string(),
+                    server: StreamDestination::preset_server("rumble").to_string(),
+                    enabled: false,
+                },
+            ],
         }
     }
 }
@@ -60,11 +105,28 @@ impl Settings {
         if self.hotkey_enabled && self.hotkey.trim().is_empty() {
             return Err("hotkey must not be empty when enabled".into());
         }
-        if !matches!(self.capture_target.as_str(), "desktop" | "window") {
-            return Err("capture_target must be desktop or window".into());
+        if !matches!(self.capture_target.as_str(), "desktop" | "window" | "fullscreen") {
+            return Err("capture_target must be desktop, window, or fullscreen".into());
         }
         if self.capture_target == "window" && self.capture_window.trim().is_empty() {
             return Err("choose a window to capture".into());
+        }
+        if !(1000..=20000).contains(&self.stream_bitrate_kbps) {
+            return Err("stream_bitrate_kbps must be between 1000 and 20000".into());
+        }
+        for dest in &self.stream_destinations {
+            if dest.name.trim().is_empty() {
+                return Err("stream destination name must not be empty".into());
+            }
+            if dest.enabled
+                && !dest.server.starts_with("rtmp://")
+                && !dest.server.starts_with("rtmps://")
+            {
+                return Err(format!(
+                    "stream destination '{}' has an invalid server URL",
+                    dest.name
+                ));
+            }
         }
         Ok(())
     }
@@ -122,6 +184,26 @@ mod tests {
         assert_eq!(s.clip_backend, "auto");
         assert_eq!(s.hotkey, "Ctrl+Alt+C");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stream_defaults_ship_x_and_rumble_disabled() {
+        let s = Settings::default();
+        assert_eq!(s.stream_bitrate_kbps, 6000);
+        assert_eq!(s.stream_destinations.len(), 2);
+        assert!(s.stream_destinations.iter().all(|d| !d.enabled));
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_bad_stream_settings() {
+        let mut s = Settings::default();
+        s.stream_bitrate_kbps = 50;
+        assert!(s.validate().is_err());
+        let mut s = Settings::default();
+        s.stream_destinations[0].enabled = true;
+        s.stream_destinations[0].server = "https://example.com".into();
+        assert!(s.validate().is_err());
     }
 
     #[test]

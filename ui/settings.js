@@ -13,9 +13,112 @@ async function load() {
   $("hotkey").value = s.hotkey;
   $("capture_target").value = s.capture_target;
   await refreshWindows(s.capture_window);
+  $("stream_bitrate").value = s.stream_bitrate_kbps;
+  renderDestinations(s.stream_destinations, await invoke("stream_keys_present"));
+  $("github-issues-url").textContent = await invoke("github_issues_url");
 
   await refreshClipStatus();
+  await refreshStreamStatus();
+  await refreshSuggestions();
 }
+
+function renderDestinations(destinations, keysPresent) {
+  const container = $("stream-destinations");
+  container.innerHTML = "";
+  destinations.forEach((d, i) => {
+    const div = document.createElement("div");
+    div.className = "destination";
+    div.innerHTML =
+      `<label><input type="checkbox" id="dest-enabled-${i}"> <strong></strong></label>` +
+      `<label>Server <input type="text" id="dest-server-${i}" size="40"></label>` +
+      `<label>Stream key <input type="password" id="dest-key-${i}" size="30" ` +
+      `placeholder=""> <button type="button" id="dest-savekey-${i}">Save key</button></label>`;
+    div.querySelector("strong").textContent = d.name;
+    container.appendChild(div);
+    $(`dest-enabled-${i}`).checked = d.enabled;
+    $(`dest-server-${i}`).value = d.server;
+    $(`dest-key-${i}`).placeholder = keysPresent.includes(d.name)
+      ? "key saved (enter to replace)"
+      : "no key saved";
+    $(`dest-savekey-${i}`).addEventListener("click", async () => {
+      const status = $("save-status");
+      try {
+        await invoke("set_stream_key", {
+          destination: d.name,
+          key: $(`dest-key-${i}`).value,
+        });
+        $(`dest-key-${i}`).value = "";
+        status.textContent = `Stream key for ${d.name} saved (encrypted).`;
+        const s = await invoke("get_settings");
+        renderDestinations(s.stream_destinations, await invoke("stream_keys_present"));
+      } catch (e) {
+        status.textContent = `Key save failed: ${e}`;
+      }
+    });
+  });
+}
+
+function readDestinations(existing) {
+  return existing.map((d, i) => ({
+    name: d.name,
+    kind: d.kind,
+    server: $(`dest-server-${i}`)?.value.trim() ?? d.server,
+    enabled: $(`dest-enabled-${i}`)?.checked ?? d.enabled,
+  }));
+}
+
+async function refreshStreamStatus() {
+  const st = await invoke("get_stream_status");
+  $("stream-status").textContent =
+    `${st.message} · ${st.bitrate_kbps} kbps` +
+    (st.destinations.length ? ` · ${st.destinations.join("  ")}` : " · no destinations enabled");
+  $("toggle-stream").textContent = st.streaming ? "Stop streaming" : "Go live";
+  return st;
+}
+
+$("toggle-stream").addEventListener("click", async () => {
+  const status = $("save-status");
+  try {
+    const st = await refreshStreamStatus();
+    if (st.streaming) {
+      await invoke("stop_stream");
+      status.textContent = "Stream stopped.";
+    } else {
+      await invoke("start_stream");
+      status.textContent = "Streaming started.";
+    }
+  } catch (e) {
+    status.textContent = `Stream error: ${e}`;
+  }
+  await refreshStreamStatus();
+});
+
+async function refreshSuggestions() {
+  const items = await invoke("list_suggestions");
+  const list = $("suggestions-list");
+  list.innerHTML = "";
+  for (const item of items.slice(-10).reverse()) {
+    const li = document.createElement("li");
+    li.textContent = item.details ? `${item.title} — ${item.details}` : item.title;
+    list.appendChild(li);
+  }
+}
+
+$("submit-suggestion").addEventListener("click", async () => {
+  const status = $("suggest-status");
+  try {
+    await invoke("submit_suggestion", {
+      title: $("suggest-title").value,
+      details: $("suggest-details").value,
+    });
+    $("suggest-title").value = "";
+    $("suggest-details").value = "";
+    status.textContent = "Suggestion saved locally. Thank you!";
+  } catch (e) {
+    status.textContent = `Could not save suggestion: ${e}`;
+  }
+  await refreshSuggestions();
+});
 
 async function refreshClipStatus() {
   const c = await invoke("get_clip_status");
@@ -64,6 +167,7 @@ $("toggle-clip").addEventListener("click", async () => {
 $("save").addEventListener("click", async () => {
   const status = $("save-status");
   try {
+    const current = await invoke("get_settings");
     await invoke("save_settings", {
       settings: {
         debloat: $("debloat").checked,
@@ -76,6 +180,8 @@ $("save").addEventListener("click", async () => {
         hotkey: $("hotkey").value.trim(),
         capture_target: $("capture_target").value,
         capture_window: $("capture_window").value,
+        stream_bitrate_kbps: Number($("stream_bitrate").value),
+        stream_destinations: readDestinations(current.stream_destinations),
       },
     });
     status.textContent = "Saved.";

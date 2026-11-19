@@ -54,7 +54,7 @@ cookies live in WebView2's own profile storage, exactly as in a browser.
 ## Install
 
 Download/run the NSIS installer from
-`src-tauri\target\release\bundle\nsis\VetCord_0.3.0_x64-setup.exe`
+the [latest release](https://github.com/VetTV-Studios/VetCord/releases/latest)
 (per-user install, no admin needed), or build it yourself with
 `npx @tauri-apps/cli@2 build` from `src-tauri\`.
 

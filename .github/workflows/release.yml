@@ -1,0 +1,104 @@
+name: Release (signed)
+
+# Builds VetCord on Windows, signs it with Azure Trusted Signing, verifies
+# the signatures, and publishes a GitHub release. Trigger by pushing a
+# version tag, e.g. `git tag v0.4.0 && git push origin v0.4.0`.
+# Required configuration (see SIGNING.md):
+#   Secrets: AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+#   Vars:    AZURE_TS_ENDPOINT, AZURE_TS_ACCOUNT, AZURE_TS_PROFILE
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # create the release
+  id-token: write # Azure OIDC login
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check signing configuration
+        shell: pwsh
+        run: |
+          $missing = @()
+          if (-not "${{ vars.AZURE_TS_ENDPOINT }}") { $missing += "vars.AZURE_TS_ENDPOINT" }
+          if (-not "${{ vars.AZURE_TS_ACCOUNT }}") { $missing += "vars.AZURE_TS_ACCOUNT" }
+          if (-not "${{ vars.AZURE_TS_PROFILE }}") { $missing += "vars.AZURE_TS_PROFILE" }
+          if (-not "${{ secrets.AZURE_CLIENT_ID }}") { $missing += "secrets.AZURE_CLIENT_ID" }
+          if (-not "${{ secrets.AZURE_TENANT_ID }}") { $missing += "secrets.AZURE_TENANT_ID" }
+          if (-not "${{ secrets.AZURE_SUBSCRIPTION_ID }}") { $missing += "secrets.AZURE_SUBSCRIPTION_ID" }
+          if ($missing.Count) {
+            Write-Host "::error::Missing Trusted Signing configuration: $($missing -join ', '). See SIGNING.md."
+            exit 1
+          }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Trusted Signing dlib
+        shell: pwsh
+        run: |
+          nuget install Microsoft.Trusted.Signing.Client -Version 1.0.86 -OutputDirectory "$env:RUNNER_TEMP\tsclient" -ExcludeVersion
+          $dlib = Get-ChildItem "$env:RUNNER_TEMP\tsclient" -Recurse -Filter Azure.CodeSigning.Dlib.dll |
+            Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $dlib) { throw "Azure.CodeSigning.Dlib.dll (x64) not found in Trusted Signing client package" }
+          "TS_DLIB=$dlib" >> $env:GITHUB_ENV
+
+      - name: Find signtool
+        shell: pwsh
+        run: |
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName
+          if (-not $signtool) { throw "signtool.exe not found on runner" }
+          "SIGNTOOL=$signtool" >> $env:GITHUB_ENV
+
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test
+
+      - name: Build (signed)
+        shell: pwsh
+        run: >
+          ./signing/Invoke-SignedBuild.ps1
+          -Endpoint "${{ vars.AZURE_TS_ENDPOINT }}"
+          -Account "${{ vars.AZURE_TS_ACCOUNT }}"
+          -Profile "${{ vars.AZURE_TS_PROFILE }}"
+          -DlibPath "$env:TS_DLIB"
+          -SignToolPath "$env:SIGNTOOL"
+          -RunBuild
+
+      - name: Verify signatures
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem src-tauri\target\release\bundle\nsis\*-setup.exe | Select-Object -First 1
+          $app = Get-Item src-tauri\target\release\vetcord.exe
+          foreach ($file in @($app.FullName, $setup.FullName)) {
+            $sig = Get-AuthenticodeSignature $file
+            Write-Host "$file -> $($sig.Status) ($($sig.SignerCertificate.Subject))"
+            if ($sig.Status -ne 'Valid') { throw "Signature not valid for $file" }
+          }
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $setup = Get-ChildItem src-tauri\target\release\bundle\nsis\*-setup.exe | Select-Object -First 1 -ExpandProperty FullName
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notlike "v*") { $tag = "v" + (Select-String -Path src-tauri\Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value }
+          gh release create $tag $setup --title "VetCord $tag" --generate-notes

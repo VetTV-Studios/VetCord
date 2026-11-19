@@ -1,2 +1,4 @@
 /src-tauri/target/
 /src-tauri/gen/
+/src-tauri/tauri.signing.generated.conf.json
+/src-tauri/signing-metadata.generated.json

@@ -298,6 +298,66 @@ fn media_permission(kind: PermissionKind, url: &url::Url) -> PermissionResponse 
     }
 }
 
+/// Origins whose mic/camera/notification permissions are pre-granted.
+#[cfg(windows)]
+const DISCORD_ORIGINS: [&str; 3] = [
+    "https://discord.com",
+    "https://canary.discord.com",
+    "https://ptb.discord.com",
+];
+
+/// Pre-grant Discord's media permissions in the WebView2 profile.
+/// Answering PermissionRequested alone is not enough: Discord only
+/// enumerates audio/video devices after a grant exists, and it does
+/// not request one just by opening Voice & Video settings, so the
+/// dropdowns stay on "Default". Setting the profile permission state
+/// up front makes enumerateDevices return every real device without
+/// ever activating a mic or camera. Best-effort: older WebView2
+/// runtimes without ICoreWebView2Profile4 simply skip this and fall
+/// back to the PermissionRequested handler plus the panel script's
+/// getUserMedia prime in Voice & Video settings.
+#[cfg(windows)]
+fn pregrant_discord_permissions(window: &tauri::WebviewWindow) {
+    let _ = window.with_webview(|webview| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            ICoreWebView2Profile4, ICoreWebView2_13, COREWEBVIEW2_PERMISSION_KIND_CAMERA,
+            COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS,
+            COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+        };
+        use webview2_com::SetPermissionStateCompletedHandler;
+        use windows_core::{Interface, PCWSTR};
+
+        let Ok(core) = webview.controller().CoreWebView2() else {
+            return;
+        };
+        let Ok(core13) = core.cast::<ICoreWebView2_13>() else {
+            return;
+        };
+        let Ok(profile) = core13.Profile() else {
+            return;
+        };
+        let Ok(profile4) = profile.cast::<ICoreWebView2Profile4>() else {
+            return;
+        };
+        let handler = SetPermissionStateCompletedHandler::create(Box::new(|_| Ok(())));
+        for origin in DISCORD_ORIGINS {
+            let wide: Vec<u16> = origin.encode_utf16().chain([0]).collect();
+            for kind in [
+                COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
+                COREWEBVIEW2_PERMISSION_KIND_CAMERA,
+                COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS,
+            ] {
+                let _ = profile4.SetPermissionState(
+                    kind,
+                    PCWSTR(wide.as_ptr()),
+                    COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+                    &handler,
+                );
+            }
+        }
+    });
+}
+
 /// Per-launch nonce embedded only in VetCord's injected panel script.
 /// Bridge URLs without it are ignored (fail closed).
 fn new_bridge_token() -> String {
@@ -458,7 +518,12 @@ fn open_main_window(app: &tauri::AppHandle, settings: &Settings) -> tauri::Resul
             Err(_) => tauri::webview::NewWindowResponse::Deny,
         }
     })
-    .build()?;
+    .build()
+    .map(|window| {
+        #[cfg(windows)]
+        pregrant_discord_permissions(&window);
+        window
+    })?;
     Ok(())
 }
 

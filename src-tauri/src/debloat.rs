@@ -218,17 +218,83 @@ const PANEL_SCRIPT: &str = r##"
   const findLeaf = (text) =>
     [...document.querySelectorAll("div, span, a, button")]
       .find((e) => e.children.length === 0 && e.textContent.trim() === text);
+  // Discord keeps hidden copies of settings labels (search index,
+  // off-screen layers). Anchoring to one of those inserts the VetCord
+  // row where nobody can see it, so every candidate must be visible.
+  const isVisible = (el) => {
+    if (!el) return false;
+    const cs = getComputedStyle(el);
+    if (cs.display === "none" || cs.visibility === "hidden") return false;
+    if (document.body && document.body.getClientRects().length && !el.getClientRects().length) return false;
+    return true;
+  };
+  // Always-available VetCord button: proof the script ran, and panel
+  // access from anywhere (including voice view, for streaming) even
+  // if Discord reshapes the settings sidebar again.
+  const ensurePill = () => {
+    if (!document.body || document.getElementById("vetcord-pill")) return;
+    const pill = document.createElement("button");
+    pill.id = "vetcord-pill";
+    pill.type = "button";
+    pill.textContent = "VetCord";
+    pill.style.cssText = "position:fixed;right:14px;bottom:96px;z-index:99999;background:#5865f2;color:#fff;border:0;border-radius:999px;padding:8px 14px;font-weight:700;font-size:13px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.4)";
+    pill.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openPanel();
+    }, true);
+    document.body.appendChild(pill);
+  };
+  // Discord only enumerates real audio/video devices after a media
+  // grant exists. When Voice & Video settings are open, request mic
+  // (and camera if present) once and stop the tracks immediately;
+  // VetCord's permission handler auto-allows it, after which the
+  // device dropdowns list every device instead of only "Default".
+  let primed = false;
+  const primeDevices = async () => {
+    if (primed || !navigator.mediaDevices?.getUserMedia) return;
+    const text = document.body?.textContent || "";
+    const inVoiceSettings = text.includes("Voice & Video") &&
+      (text.includes("Mic Test") || text.includes("Test Video") || text.includes("Microphone Volume"));
+    if (!inVoiceSettings) return;
+    primed = true;
+    const stopAll = (s) => s?.getTracks().forEach((t) => t.stop());
+    try {
+      stopAll(await navigator.mediaDevices.getUserMedia({ audio: true, video: true }));
+    } catch {
+      try { stopAll(await navigator.mediaDevices.getUserMedia({ audio: true })); } catch {}
+    }
+  };
   const ensureSidebarItem = () => {
-    if (document.getElementById("vetcord-settings-item")) return;
+    const existing = document.getElementById("vetcord-settings-item");
+    if (existing) {
+      if (isVisible(existing)) return;
+      existing.remove(); // hidden clone from an earlier bad anchor
+    }
     if (!document.body) return;
     const bodyText = document.body.textContent || "";
     if (settingsMarkerCount(bodyText) < 2) return; // User Settings not open
-    // Strategy 1: clone an existing settings row (old and new labels).
+    // Strategy 1 (new UI): custom row right under the settings Search
+    // box at the top of the sidebar - always in view when settings open.
+    const search = document.querySelector('input[placeholder*="Search" i]');
+    if (search && isVisible(search)) {
+      let wrap = search;
+      for (let i = 0; i < 3 && wrap.parentElement; i++) wrap = wrap.parentElement;
+      if (wrap.parentElement) {
+        const item = document.createElement("div");
+        item.className = "vetcord-custom-row";
+        item.textContent = "VetCord";
+        wrap.after(wireItem(item));
+        if (isVisible(item)) return;
+        item.remove();
+      }
+    }
+    // Strategy 2: clone a visible existing settings row (old/new labels).
     for (const anchor of ["My Account", "Notifications", "Nitro", "Account Info", "Voice & Video"]) {
       const el = findLeaf(anchor);
-      if (!el) continue;
+      if (!el || !isVisible(el)) continue;
       const row = clickableRow(el);
-      if (!row || !row.parentElement) continue;
+      if (!row || !row.parentElement || !isVisible(row)) continue;
       // The row must sit inside the settings navigation, not elsewhere.
       let container = row.parentElement;
       let inSettingsNav = settingsMarkerCount(container.textContent) >= 2;
@@ -240,17 +306,6 @@ const PANEL_SCRIPT: &str = r##"
       row.after(cloneRowItem(row, anchor));
       return;
     }
-    // Strategy 2: custom row under the settings Search box, near the top
-    // of the sidebar where it is always visible.
-    const search = document.querySelector('input[placeholder*="Search" i]');
-    if (search) {
-      let wrap = search;
-      for (let i = 0; i < 4 && wrap.parentElement; i++) wrap = wrap.parentElement;
-      const item = document.createElement("div");
-      item.className = "vetcord-custom-row";
-      item.textContent = "VetCord";
-      wrap.after(wireItem(item));
-    }
   };
 
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePanel(); });
@@ -260,7 +315,7 @@ const PANEL_SCRIPT: &str = r##"
     pending = true;
     setTimeout(() => {
       pending = false;
-      try { applyTweaks(); ensureSidebarItem(); } catch {}
+      try { applyTweaks(); ensurePill(); ensureSidebarItem(); primeDevices(); } catch {}
     }, 400);
   };
   new MutationObserver(tick).observe(document.documentElement, { childList: true, subtree: true });
@@ -282,6 +337,9 @@ mod tests {
         // "My Account", and the Search box is the fallback anchor.
         assert!(script.contains("Account Info"), "new settings sidebar anchor");
         assert!(script.contains("vetcord-custom-row"), "search-box fallback row");
+        assert!(script.contains("vetcord-pill"), "always-visible VetCord button");
+        assert!(script.contains("getUserMedia"), "device enumeration prime");
+        assert!(script.contains("isVisible"), "hidden-anchor guard");
         assert!(script.contains("Live streaming to X"), "streaming section");
         assert!(script.contains("vetcord.bridge/tok123") || script.contains("tok123"));
         // The settings snapshot lets the panel list X/Rumble destinations.

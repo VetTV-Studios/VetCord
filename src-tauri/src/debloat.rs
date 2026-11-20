@@ -71,10 +71,13 @@ const PANEL_SCRIPT: &str = r##"
       style.id = "vetcord-tweaks";
       (document.head || document.documentElement).appendChild(style);
     }
-    style.textContent = Object.entries(TWEAKS)
-      .filter(([k]) => tweaks[k])
-      .map(([, v]) => v.css)
-      .join("\n");
+    style.textContent =
+      "#vetcord-settings-item{cursor:pointer} " +
+      ".vetcord-custom-row{display:flex;align-items:center;gap:8px;margin:6px 8px;padding:8px 10px;border-radius:6px;background:#5865f2;color:#fff;font-weight:600;font-size:14px;cursor:pointer}\n" +
+      Object.entries(TWEAKS)
+        .filter(([k]) => tweaks[k])
+        .map(([, v]) => v.css)
+        .join("\n");
   };
   const bridge = (action, query) => {
     if (!TOKEN) return;
@@ -169,39 +172,84 @@ const PANEL_SCRIPT: &str = r##"
     overlay.querySelector("#vc-toggle-stream").addEventListener("click", () => { bridge("toggle-stream"); note("Streaming toggled in VetCord. Check VetCord Settings for status."); });
   };
 
-  // Add a "Vetcord" entry to Discord's User Settings sidebar (the one
-  // opened by the gear/pinwheel next to the username). We clone the
-  // "My Account" row so it inherits Discord's current styling, and
-  // re-insert after React re-renders remove it.
+  // Add a "VetCord" entry to Discord's User Settings sidebar (the one
+  // opened by the gear/pinwheel next to the username), and re-insert
+  // after React re-renders remove it. Discord's redesigned settings
+  // dropped the "My Account" label for "Account" / "Account Info", so
+  // several anchors are tried, most specific first.
+  const SETTINGS_MARKERS = ["Account Info", "Voice & Video", "Data & Privacy", "Notifications", "Log Out"];
+  const settingsMarkerCount = (text) =>
+    SETTINGS_MARKERS.filter((m) => text && text.includes(m)).length;
+  const clickableRow = (el) => {
+    let row = el;
+    for (let i = 0; i < 6 && row; i++) {
+      const role = row.getAttribute && row.getAttribute("role");
+      if (role === "tab" || role === "button" || row.tagName === "BUTTON") break;
+      row = row.parentElement;
+    }
+    return row || el.parentElement;
+  };
+  const wireItem = (item) => {
+    item.id = "vetcord-settings-item";
+    item.removeAttribute("aria-selected");
+    item.style.cursor = "pointer";
+    item.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openPanel();
+    }, true);
+    return item;
+  };
+  const cloneRowItem = (row, anchorText) => {
+    const item = row.cloneNode(true);
+    const leaf = [...item.querySelectorAll("*")]
+      .find((e) => e.children.length === 0 && e.textContent.trim() === anchorText);
+    if (leaf) {
+      leaf.textContent = "VetCord";
+      // Clear any other text (badges, sublabels) copied from the anchor row.
+      [...item.querySelectorAll("*")]
+        .filter((e) => e !== leaf && e.children.length === 0 && e.textContent.trim())
+        .forEach((e) => { e.textContent = ""; });
+    } else {
+      item.textContent = "VetCord";
+    }
+    return wireItem(item);
+  };
+  const findLeaf = (text) =>
+    [...document.querySelectorAll("div, span, a, button")]
+      .find((e) => e.children.length === 0 && e.textContent.trim() === text);
   const ensureSidebarItem = () => {
     if (document.getElementById("vetcord-settings-item")) return;
-    if (!document.body || !document.body.textContent.includes("Log Out")) return;
-    const leaves = document.querySelectorAll("div, span");
-    for (const el of leaves) {
-      if (el.children.length !== 0 || el.textContent.trim() !== "My Account") continue;
-      let row = el;
-      for (let i = 0; i < 5 && row; i++) {
-        const role = row.getAttribute && row.getAttribute("role");
-        if (role === "tab" || role === "button") break;
-        row = row.parentElement;
-      }
+    if (!document.body) return;
+    const bodyText = document.body.textContent || "";
+    if (settingsMarkerCount(bodyText) < 2) return; // User Settings not open
+    // Strategy 1: clone an existing settings row (old and new labels).
+    for (const anchor of ["My Account", "Notifications", "Nitro", "Account Info", "Voice & Video"]) {
+      const el = findLeaf(anchor);
+      if (!el) continue;
+      const row = clickableRow(el);
       if (!row || !row.parentElement) continue;
-      if (!row.parentElement.textContent.includes("Log Out")) continue;
-      const item = row.cloneNode(true);
-      item.id = "vetcord-settings-item";
-      item.removeAttribute("aria-selected");
-      const leaf = [...item.querySelectorAll("*")]
-        .find((e) => e.children.length === 0 && e.textContent.trim() === "My Account");
-      if (leaf) leaf.textContent = "VetCord";
-      else item.textContent = "VetCord";
-      item.style.cursor = "pointer";
-      item.addEventListener("click", (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        openPanel();
-      }, true);
-      row.after(item);
+      // The row must sit inside the settings navigation, not elsewhere.
+      let container = row.parentElement;
+      let inSettingsNav = settingsMarkerCount(container.textContent) >= 2;
+      for (let i = 0; i < 6 && !inSettingsNav && container; i++) {
+        container = container.parentElement;
+        inSettingsNav = container && settingsMarkerCount(container.textContent) >= 2;
+      }
+      if (!inSettingsNav) continue;
+      row.after(cloneRowItem(row, anchor));
       return;
+    }
+    // Strategy 2: custom row under the settings Search box, near the top
+    // of the sidebar where it is always visible.
+    const search = document.querySelector('input[placeholder*="Search" i]');
+    if (search) {
+      let wrap = search;
+      for (let i = 0; i < 4 && wrap.parentElement; i++) wrap = wrap.parentElement;
+      const item = document.createElement("div");
+      item.className = "vetcord-custom-row";
+      item.textContent = "VetCord";
+      wrap.after(wireItem(item));
     }
   };
 
@@ -229,7 +277,11 @@ mod tests {
     fn script_injects_vetcord_settings_section_with_streaming() {
         let script = initialization_script(&Settings::default(), "tok123");
         assert!(script.contains("vetcord-settings-item"), "sidebar entry");
-        assert!(script.contains("My Account"), "settings sidebar anchor");
+        assert!(script.contains("My Account"), "old settings sidebar anchor");
+        // Redesigned Discord settings: "Account Info" replaces
+        // "My Account", and the Search box is the fallback anchor.
+        assert!(script.contains("Account Info"), "new settings sidebar anchor");
+        assert!(script.contains("vetcord-custom-row"), "search-box fallback row");
         assert!(script.contains("Live streaming to X"), "streaming section");
         assert!(script.contains("vetcord.bridge/tok123") || script.contains("tok123"));
         // The settings snapshot lets the panel list X/Rumble destinations.

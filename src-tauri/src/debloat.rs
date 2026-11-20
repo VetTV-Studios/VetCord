@@ -27,6 +27,7 @@ pub fn initialization_script(settings: &Settings, bridge_token: &str) -> String 
 
 const PANEL_SCRIPT: &str = r##"
 (() => {
+  if (window.top !== window.self) return; // main frame only (Windows adds init scripts to subframes too)
   const VC = window.__VETCORD__ || {};
   const TOKEN = VC.bridgeToken || "";
   const SNAP = VC.settings || {};
@@ -103,7 +104,7 @@ const PANEL_SCRIPT: &str = r##"
     overlay.innerHTML =
       '<div style="width:min(640px,92vw);max-height:88vh;overflow:auto;background:#2b2d31;color:#e3e5e8;border-radius:8px;padding:20px 22px;font-family:inherit">' +
       '<div style="display:flex;justify-content:space-between;align-items:center">' +
-      "<h2 style=\"margin:0\">Vetcord</h2>" +
+      "<h2 style=\"margin:0\">VetCord</h2>" +
       '<button type="button" id="vc-close" style="' + btnStyle + '">Close</button></div>' +
       '<p style="color:#949ba4;font-size:13px">VetCord-only features. Discord tweaks apply instantly ' +
       "and are saved on this PC. Version " + esc(VC.version || "") + ".</p>" +
@@ -318,8 +319,19 @@ const PANEL_SCRIPT: &str = r##"
       try { applyTweaks(); ensurePill(); ensureSidebarItem(); primeDevices(); } catch {}
     }, 400);
   };
-  new MutationObserver(tick).observe(document.documentElement, { childList: true, subtree: true });
-  tick();
+  // WebView2 runs document-created scripts before <html> exists, so
+  // document.documentElement can be null here; observing it throws
+  // and kills the whole script. Wait for the root element instead.
+  const startObserver = () => {
+    if (document.documentElement) {
+      new MutationObserver(tick).observe(document.documentElement, { childList: true, subtree: true });
+      tick();
+    } else {
+      setTimeout(startObserver, 50);
+    }
+  };
+  document.addEventListener("DOMContentLoaded", tick);
+  startObserver();
 })();
 "##;
 
@@ -340,6 +352,10 @@ mod tests {
         assert!(script.contains("vetcord-pill"), "always-visible VetCord button");
         assert!(script.contains("getUserMedia"), "device enumeration prime");
         assert!(script.contains("isVisible"), "hidden-anchor guard");
+        // Regression: observing a null documentElement at document-start
+        // threw and killed the whole injected script in WebView2.
+        assert!(script.contains("startObserver"), "deferred observer start");
+        assert!(script.contains("DOMContentLoaded"), "DOMContentLoaded tick");
         assert!(script.contains("Live streaming to X"), "streaming section");
         assert!(script.contains("vetcord.bridge/tok123") || script.contains("tok123"));
         // The settings snapshot lets the panel list X/Rumble destinations.

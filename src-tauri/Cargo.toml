@@ -1,6 +1,6 @@
 [package]
 name = "vetcord"
-version = "0.5.2"
+version = "0.5.3"
 description = "VetCord - a lightweight, open-source Discord client"
 edition = "2021"
 license = "MIT"

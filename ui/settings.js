@@ -1,6 +1,21 @@
 const invoke = window.__TAURI__.core.invoke;
 const $ = (id) => document.getElementById(id);
 
+// Fallback presets if the backend ever returns no destinations, so the
+// X/Rumble setup rows always show.
+const PRESET_DESTINATIONS = [
+  { name: "X", kind: "x", server: "rtmps://rtmp-ams.pscp.tv:443/x", enabled: false },
+  { name: "Rumble", kind: "rumble", server: "rtmp://rtmp.rumble.com/live", enabled: false },
+];
+
+async function fetchKeysPresent() {
+  try {
+    return await invoke("stream_keys_present");
+  } catch {
+    return [];
+  }
+}
+
 async function load() {
   const s = await invoke("get_settings");
   $("debloat").checked = s.debloat;
@@ -12,17 +27,23 @@ async function load() {
   $("hotkey_enabled").checked = s.hotkey_enabled;
   $("hotkey").value = s.hotkey;
   $("capture_target").value = s.capture_target;
-  await refreshWindows(s.capture_window);
+  // Render streaming setup before other refreshes: a failing window list
+  // or key store must not leave the X/Rumble rows blank.
   $("stream_bitrate").value = s.stream_bitrate_kbps;
-  renderDestinations(s.stream_destinations, await invoke("stream_keys_present"));
+  renderDestinations(s.stream_destinations, await fetchKeysPresent());
+  await refreshWindows(s.capture_window);
   $("github-issues-url").textContent = await invoke("github_issues_url");
 
   await refreshClipStatus();
   await refreshStreamStatus();
   await refreshSuggestions();
+  if (location.hash) {
+    document.querySelector(location.hash)?.scrollIntoView();
+  }
 }
 
 function renderDestinations(destinations, keysPresent) {
+  if (!destinations?.length) destinations = PRESET_DESTINATIONS;
   const container = $("stream-destinations");
   container.innerHTML = "";
   destinations.forEach((d, i) => {
@@ -50,7 +71,7 @@ function renderDestinations(destinations, keysPresent) {
         $(`dest-key-${i}`).value = "";
         status.textContent = `Stream key for ${d.name} saved (encrypted).`;
         const s = await invoke("get_settings");
-        renderDestinations(s.stream_destinations, await invoke("stream_keys_present"));
+        renderDestinations(s.stream_destinations, await fetchKeysPresent());
       } catch (e) {
         status.textContent = `Key save failed: ${e}`;
       }
@@ -59,6 +80,7 @@ function renderDestinations(destinations, keysPresent) {
 }
 
 function readDestinations(existing) {
+  if (!existing?.length) existing = PRESET_DESTINATIONS;
   return existing.map((d, i) => ({
     name: d.name,
     kind: d.kind,

@@ -48,6 +48,24 @@ pub struct StreamDestination {
 }
 
 impl StreamDestination {
+    /// The built-in destinations shown in streaming setup.
+    pub fn presets() -> Vec<Self> {
+        vec![
+            Self {
+                name: "X".to_string(),
+                kind: "x".to_string(),
+                server: Self::preset_server("x").to_string(),
+                enabled: false,
+            },
+            Self {
+                name: "Rumble".to_string(),
+                kind: "rumble".to_string(),
+                server: Self::preset_server("rumble").to_string(),
+                enabled: false,
+            },
+        ]
+    }
+
     pub fn preset_server(kind: &str) -> &'static str {
         match kind {
             // X (Twitter) Media Studio producer ingest.
@@ -73,20 +91,7 @@ impl Default for Settings {
             capture_target: "desktop".to_string(),
             capture_window: String::new(),
             stream_bitrate_kbps: 6000,
-            stream_destinations: vec![
-                StreamDestination {
-                    name: "X".to_string(),
-                    kind: "x".to_string(),
-                    server: StreamDestination::preset_server("x").to_string(),
-                    enabled: false,
-                },
-                StreamDestination {
-                    name: "Rumble".to_string(),
-                    kind: "rumble".to_string(),
-                    server: StreamDestination::preset_server("rumble").to_string(),
-                    enabled: false,
-                },
-            ],
+            stream_destinations: StreamDestination::presets(),
         }
     }
 }
@@ -132,10 +137,16 @@ impl Settings {
     }
 
     pub fn load(path: &PathBuf) -> Self {
-        match std::fs::read_to_string(path) {
+        let mut settings = match std::fs::read_to_string(path) {
             Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
             Err(_) => Self::default(),
+        };
+        // A saved empty list would make the X/Rumble setup rows vanish;
+        // serde defaults only cover a *missing* field, not an empty one.
+        if settings.stream_destinations.is_empty() {
+            settings.stream_destinations = StreamDestination::presets();
         }
+        settings
     }
 
     pub fn save(&self, path: &PathBuf) -> Result<(), String> {
@@ -183,6 +194,35 @@ mod tests {
         assert_eq!(s.clip_seconds, 90);
         assert_eq!(s.clip_backend, "auto");
         assert_eq!(s.hotkey, "Ctrl+Alt+C");
+        // Streaming fields added in v0.3 must appear for pre-streaming
+        // settings files, or the X/Rumble setup rows never render.
+        assert_eq!(s.stream_bitrate_kbps, 6000);
+        assert_eq!(s.stream_destinations.len(), 2);
+        assert_eq!(s.stream_destinations[0].name, "X");
+        assert_eq!(
+            s.stream_destinations[0].server,
+            StreamDestination::preset_server("x")
+        );
+        assert_eq!(s.stream_destinations[1].name, "Rumble");
+        assert_eq!(
+            s.stream_destinations[1].server,
+            StreamDestination::preset_server("rumble")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn empty_saved_stream_destinations_are_backfilled_with_presets() {
+        // A settings file saved with an empty list must not leave the
+        // streaming setup permanently blank in the UI.
+        let dir = std::env::temp_dir().join("vetcord-test-settings-empty-dests");
+        let path = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, r#"{"stream_destinations":[]}"#).unwrap();
+        let s = Settings::load(&path);
+        assert_eq!(s.stream_destinations.len(), 2);
+        assert_eq!(s.stream_destinations[0].name, "X");
+        assert_eq!(s.stream_destinations[1].name, "Rumble");
         let _ = std::fs::remove_dir_all(dir);
     }
 

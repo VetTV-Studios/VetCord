@@ -50,6 +50,22 @@ cookies live in WebView2's own profile storage, exactly as in a browser.
 - **Suggest a feature:** Settings has a suggestion form saved locally
   (`suggestions.jsonl` in the app data folder — VetCord has no backend
   server) plus a GitHub Issues link for public tracking.
+- **Voice & video devices:** VetCord answers WebView2 mic/camera/
+  notification permission requests for Discord, so Discord's Voice &
+  Video settings list your real microphones, cameras and speakers —
+  not just "Default". (WebView2 has no built-in permission prompt;
+  without the handler, Chromium hides every non-default device.)
+- **VetCord section in Discord settings:** opening Discord's User
+  Settings (gear icon) adds a **VetCord** entry to the settings
+  sidebar. It opens a panel with BetterDiscord-style Discord tweaks
+  (hide Nitro/shop upsells, gift buttons, Apps/sticker buttons,
+  Active Now — CSS-only, applied instantly, saved locally), app
+  shortcuts (native Settings, clipping), and **Live streaming to
+  X & Rumble** controls (enable destinations, open streaming setup,
+  Go Live via RTMP — separate from Discord Go Live, which only
+  streams inside Discord). Panel actions reach the Rust backend
+  through per-launch-token bridge URLs; stream keys are never
+  entered in the Discord page, only in the native Settings window.
 
 ## Install
 
@@ -82,6 +98,15 @@ target, and press **Go live**. The ffmpeg command construction and
 the tee/`onfail=ignore` behaviour are covered by unit tests and were
 exercised locally, but end-to-end ingestion against real X/Rumble
 accounts has not been tested by the author.
+
+## Roadmap
+
+- v0.5.0 ships on the current Rust + Tauri/WebView2 stack. A move to
+  a native Rust + WinUI 3 shell is planned as a separate major
+  effort; note that WinUI 3 hosts web content through its WebView2
+  control, so Discord's web client stays on the WebView2 engine
+  either way — what changes is the native window/settings chrome
+  around it.
 
 ## Honest limitations
 

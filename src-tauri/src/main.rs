@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
+use tauri::webview::{PermissionKind, PermissionResponse};
 use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 const DISCORD_APP_URL: &str = "https://discord.com/app";
@@ -25,6 +26,8 @@ struct AppState {
     settings_path: PathBuf,
     config_dir: PathBuf,
     data_dir: PathBuf,
+    /// Per-launch nonce for the in-Discord VetCord panel bridge URLs.
+    bridge_token: String,
     popups: AtomicU32,
     recorder: std::sync::Mutex<Option<clip::Recorder>>,
     streamer: std::sync::Mutex<Option<stream::Streamer>>,
@@ -222,18 +225,38 @@ fn github_issues_url() -> &'static str {
     suggestions::GITHUB_ISSUES_URL
 }
 
-#[tauri::command]
-fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
+/// Open Settings, optionally scrolled to a section anchor
+/// (e.g. "#streaming" for the X/Rumble streaming setup).
+fn open_settings_at(app: tauri::AppHandle, anchor: &str) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("settings") {
         let _ = window.set_focus();
+        if !anchor.is_empty() {
+            let _ = window.eval(format!(
+                "document.querySelector('{anchor}')?.scrollIntoView()"
+            ));
+        }
         return Ok(());
     }
-    WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("index.html".into()))
-        .title("VetCord Settings")
-        .inner_size(560.0, 640.0)
-        .build()
-        .map_err(|e| e.to_string())?;
+    WebviewWindowBuilder::new(
+        &app,
+        "settings",
+        WebviewUrl::App(format!("index.html{anchor}").into()),
+    )
+    .title("VetCord Settings")
+    .inner_size(560.0, 760.0)
+    .build()
+    .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
+    open_settings_at(app, "")
+}
+
+#[tauri::command]
+fn open_streaming_setup(app: tauri::AppHandle) -> Result<(), String> {
+    open_settings_at(app, "#streaming")
 }
 
 fn is_discord_url(url: &url::Url) -> bool {
@@ -256,9 +279,140 @@ fn is_discord_url(url: &url::Url) -> bool {
         .unwrap_or(false)
 }
 
+/// Decide a WebView2 permission request. WebView2 has no built-in
+/// prompt UI, so without this handler Discord's getUserMedia calls are
+/// refused and Chromium only exposes the "default" microphone, camera
+/// and speaker in Discord's Voice & Video settings. Allowing mic/camera
+/// (and notifications) for Discord origins makes enumerateDevices
+/// return every real device. All other kinds and origins fail closed
+/// to the platform default.
+fn media_permission(kind: PermissionKind, url: &url::Url) -> PermissionResponse {
+    if !is_discord_url(url) {
+        return PermissionResponse::Default;
+    }
+    match kind {
+        PermissionKind::Microphone | PermissionKind::Camera | PermissionKind::Notifications => {
+            PermissionResponse::Allow
+        }
+        _ => PermissionResponse::Default,
+    }
+}
+
+/// Per-launch nonce embedded only in VetCord's injected panel script.
+/// Bridge URLs without it are ignored (fail closed).
+fn new_bridge_token() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut x = nanos ^ ((std::process::id() as u64) << 32) ^ 0x9e37_79b9_7f4a_7c15;
+    let mut out = String::new();
+    for _ in 0..4 {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        out.push_str(&format!("{:016x}", x.wrapping_mul(0x2545_f491_4f6c_dd1d)));
+    }
+    out
+}
+
+/// Actions the in-Discord VetCord panel may request via bridge URLs.
+/// Deliberately narrow: no stream-key access. Stream keys are entered
+/// only in the native Settings window.
+#[derive(Debug, PartialEq)]
+enum BridgeAction {
+    OpenSettings,
+    OpenStreamingSetup,
+    ToggleClipping,
+    SaveClip,
+    ToggleStream,
+    SetDebloat(bool),
+    SetStreamEnabled { index: usize, enabled: bool },
+}
+
+fn parse_bridge_action(url: &url::Url, token: &str) -> Option<BridgeAction> {
+    if token.is_empty() || url.host_str() != Some("vetcord.bridge") {
+        return None;
+    }
+    let mut segments = url.path_segments()?;
+    if segments.next()? != token {
+        return None;
+    }
+    let query = |key: &str| {
+        url.query_pairs()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.into_owned())
+    };
+    match segments.next()? {
+        "open-settings" => Some(BridgeAction::OpenSettings),
+        "open-streaming" => Some(BridgeAction::OpenStreamingSetup),
+        "toggle-clip" => Some(BridgeAction::ToggleClipping),
+        "save-clip" => Some(BridgeAction::SaveClip),
+        "toggle-stream" => Some(BridgeAction::ToggleStream),
+        "set-debloat" => match query("v")?.as_str() {
+            "1" => Some(BridgeAction::SetDebloat(true)),
+            "0" => Some(BridgeAction::SetDebloat(false)),
+            _ => None,
+        },
+        "set-stream-enabled" => {
+            let index: usize = query("i")?.parse().ok()?;
+            let enabled = match query("v")?.as_str() {
+                "1" => true,
+                "0" => false,
+                _ => return None,
+            };
+            Some(BridgeAction::SetStreamEnabled { index, enabled })
+        }
+        _ => None,
+    }
+}
+
+fn perform_bridge_action(app: &tauri::AppHandle, action: BridgeAction) {
+    match action {
+        BridgeAction::OpenSettings => {
+            let _ = open_settings(app.clone());
+        }
+        BridgeAction::OpenStreamingSetup => {
+            let _ = open_streaming_setup(app.clone());
+        }
+        BridgeAction::ToggleClipping => {
+            if get_clip_status(app.state::<AppState>()).capturing {
+                stop_clipping(app.state::<AppState>());
+            } else {
+                let _ = start_clipping(app.state::<AppState>());
+            }
+        }
+        BridgeAction::SaveClip => {
+            let _ = save_clip(app.state::<AppState>());
+        }
+        BridgeAction::ToggleStream => {
+            if get_stream_status(app.state::<AppState>()).streaming {
+                stop_stream(app.state::<AppState>());
+            } else {
+                let _ = start_stream(app.state::<AppState>());
+            }
+        }
+        BridgeAction::SetDebloat(enabled) => {
+            let state = app.state::<AppState>();
+            let mut s = Settings::load(&state.settings_path);
+            s.debloat = enabled;
+            let _ = s.save(&state.settings_path);
+        }
+        BridgeAction::SetStreamEnabled { index, enabled } => {
+            let state = app.state::<AppState>();
+            let mut s = Settings::load(&state.settings_path);
+            if let Some(dest) = s.stream_destinations.get_mut(index) {
+                dest.enabled = enabled;
+                let _ = s.save(&state.settings_path);
+            }
+        }
+    }
+}
+
 fn open_main_window(app: &tauri::AppHandle, settings: &Settings) -> tauri::Result<()> {
     let handle = app.clone();
-    let script = debloat::initialization_script(settings.debloat);
+    let bridge_token = app.state::<AppState>().bridge_token.clone();
+    let script = debloat::initialization_script(settings, &bridge_token);
     WebviewWindowBuilder::new(
         app,
         "main",
@@ -269,8 +423,22 @@ fn open_main_window(app: &tauri::AppHandle, settings: &Settings) -> tauri::Resul
     .min_inner_size(940.0, 500.0)
     .user_agent(CHROME_USER_AGENT)
     .initialization_script(&script)
+    .on_permission_request(|webview, kind| match webview.url() {
+        Ok(url) => media_permission(kind, &url),
+        Err(_) => PermissionResponse::Default,
+    })
     .on_navigation(|url| is_discord_url(url))
     .on_new_window(move |url, _features| {
+        // VetCord panel bridge: our injected script opens
+        // https://vetcord.bridge/<token>/<action> as a new window.
+        // Perform the whitelisted action and never open a window for it.
+        if url.host_str() == Some("vetcord.bridge") {
+            let token = handle.state::<AppState>().bridge_token.clone();
+            if let Some(action) = parse_bridge_action(&url, &token) {
+                perform_bridge_action(&handle, action);
+            }
+            return tauri::webview::NewWindowResponse::Deny;
+        }
         // OAuth / login popups open as VetCord windows, not system browser tabs.
         let n = handle
             .state::<AppState>()
@@ -296,9 +464,19 @@ fn open_main_window(app: &tauri::AppHandle, settings: &Settings) -> tauri::Resul
 
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let settings_item = MenuItem::with_id(app, "settings", "VetCord Settings", true, None::<&str>)?;
+    let streaming_item = MenuItem::with_id(
+        app,
+        "streaming_setup",
+        "Live Streaming Setup (X / Rumble)",
+        true,
+        None::<&str>,
+    )?;
     let clip_item = MenuItem::with_id(app, "save_clip", "Save Clip", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit VetCord", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&settings_item, &clip_item, &quit_item])?;
+    let menu = Menu::with_items(
+        app,
+        &[&settings_item, &streaming_item, &clip_item, &quit_item],
+    )?;
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
         .expect("embedded icon");
     TrayIconBuilder::new()
@@ -308,6 +486,9 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "settings" => {
                 let _ = open_settings(app.clone());
+            }
+            "streaming_setup" => {
+                let _ = open_streaming_setup(app.clone());
             }
             "save_clip" => {
                 let _ = save_clip(app.state::<AppState>());
@@ -353,6 +534,7 @@ fn main() {
                 settings_path: path,
                 config_dir,
                 data_dir,
+                bridge_token: new_bridge_token(),
                 popups: AtomicU32::new(0),
                 recorder: std::sync::Mutex::new(None),
                 streamer: std::sync::Mutex::new(None),
@@ -396,7 +578,8 @@ fn main() {
             submit_suggestion,
             list_suggestions,
             github_issues_url,
-            open_settings
+            open_settings,
+            open_streaming_setup
         ])
         .build(tauri::generate_context!())
         .expect("error while building VetCord")
@@ -419,6 +602,71 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discord_media_permissions_are_allowed_so_devices_enumerate() {
+        use tauri::webview::{PermissionKind, PermissionResponse};
+        let discord: url::Url = "https://discord.com/app".parse().unwrap();
+        // Without Allow, getUserMedia is refused and Chromium only ever
+        // exposes the "default" mic/camera/speaker to Discord settings.
+        assert_eq!(
+            media_permission(PermissionKind::Microphone, &discord),
+            PermissionResponse::Allow
+        );
+        assert_eq!(
+            media_permission(PermissionKind::Camera, &discord),
+            PermissionResponse::Allow
+        );
+        assert_eq!(
+            media_permission(PermissionKind::Notifications, &discord),
+            PermissionResponse::Allow
+        );
+        // Everything else, and every non-Discord origin, keeps the
+        // platform default (fail closed).
+        assert_eq!(
+            media_permission(PermissionKind::Geolocation, &discord),
+            PermissionResponse::Default
+        );
+        let other: url::Url = "https://example.com/".parse().unwrap();
+        assert_eq!(
+            media_permission(PermissionKind::Microphone, &other),
+            PermissionResponse::Default
+        );
+        assert_eq!(
+            media_permission(PermissionKind::Camera, &other),
+            PermissionResponse::Default
+        );
+    }
+
+    #[test]
+    fn bridge_actions_require_the_per_launch_token() {
+        let token = "abc123token";
+        let ok: url::Url = "https://vetcord.bridge/abc123token/open-streaming".parse().unwrap();
+        assert_eq!(
+            parse_bridge_action(&ok, token),
+            Some(BridgeAction::OpenStreamingSetup)
+        );
+        let dest: url::Url = "https://vetcord.bridge/abc123token/set-stream-enabled?i=1&v=1"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            parse_bridge_action(&dest, token),
+            Some(BridgeAction::SetStreamEnabled {
+                index: 1,
+                enabled: true
+            })
+        );
+        // Fail closed: wrong token, wrong host, unknown action, bad value.
+        let wrong: url::Url = "https://vetcord.bridge/nope/open-streaming".parse().unwrap();
+        assert_eq!(parse_bridge_action(&wrong, token), None);
+        let host: url::Url = "https://evil.example/abc123token/open-streaming".parse().unwrap();
+        assert_eq!(parse_bridge_action(&host, token), None);
+        let unknown: url::Url = "https://vetcord.bridge/abc123token/set-stream-key".parse().unwrap();
+        assert_eq!(parse_bridge_action(&unknown, token), None);
+        let bad: url::Url = "https://vetcord.bridge/abc123token/set-debloat?v=2".parse().unwrap();
+        assert_eq!(parse_bridge_action(&bad, token), None);
+        assert_eq!(parse_bridge_action(&ok, ""), None);
+    }
 
     #[test]
     fn discord_urls_are_allowed_in_app() {

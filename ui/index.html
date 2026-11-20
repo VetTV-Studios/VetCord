@@ -10,6 +10,8 @@
   <h1>VetCord Settings</h1>
   <p class="muted">Login happens on Discord's own page in the main window.
   VetCord never sees or stores your password or token.</p>
+  <p><a href="#streaming">→ Live streaming setup (X &amp; Rumble)</a> ·
+     <a href="#clipping">Clipping</a></p>
 
   <section>
     <h2>Client</h2>
@@ -17,7 +19,7 @@
     <label><input type="checkbox" id="start_minimised"> Start minimised</label>
   </section>
 
-  <section>
+  <section id="clipping">
     <h2>Automatic clipping</h2>
     <label><input type="checkbox" id="clipping_enabled"> Auto-start replay buffer on launch</label>
     <label>Buffer length (seconds)
@@ -67,8 +69,8 @@
     community server, then enable <em>Community</em> under Server Settings.</p>
   </section>
 
-  <section>
-    <h2>Live multistream (X, Rumble, custom RTMP)</h2>
+  <section id="streaming">
+    <h2>Live streaming setup — X &amp; Rumble (direct RTMP multistream)</h2>
     <p class="muted">Pushes the same capture used for clipping to every enabled
     destination at once. Stream keys are encrypted on this PC (Windows DPAPI)
     and never shown again after saving. Live ingestion needs your own
